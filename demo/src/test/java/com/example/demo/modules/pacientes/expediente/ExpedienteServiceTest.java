@@ -1,0 +1,124 @@
+package com.example.demo.modules.pacientes.expediente;
+
+import com.example.demo.modules.clinica.alta.EstadoAlta;
+import com.example.demo.modules.clinica.alta.altaEntity;
+import com.example.demo.modules.clinica.alta.altaRepository;
+import com.example.demo.modules.pacientes.paciente.EpisodioEntity;
+import com.example.demo.modules.pacientes.paciente.EpisodioRepository;
+import com.example.demo.modules.pacientes.paciente.PacienteRepository;
+import com.example.demo.modules.pacientes.paciente.PersonaResponsableEntity;
+import com.example.demo.modules.pacientes.paciente.TipoAtencion;
+import com.example.demo.modules.pacientes.camas.camasEntity;
+import com.example.demo.modules.usuarios.usuarios.PersonaEntity;
+import com.example.demo.modules.usuarios.usuarios.UsuarioEntity;
+import com.example.demo.security.UsuarioActualService;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.security.access.AccessDeniedException;
+
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+class ExpedienteServiceTest {
+
+    @Mock
+    private PacienteRepository pacienteRepository;
+    @Mock
+    private EpisodioRepository episodioRepository;
+    @Mock
+    private altaRepository altaRepository;
+    @Mock
+    private UsuarioActualService usuarioActualService;
+
+    @InjectMocks
+    private ExpedienteService service;
+
+    @Test
+    void listarEpisodios_devuelveElUltimoEpisodioConSuEgresoYMedico() {
+        UsuarioEntity medico = new UsuarioEntity();
+        PersonaEntity persona = new PersonaEntity();
+        persona.setPrimerNombre("Ana");
+        persona.setPrimerApellido("Pérez");
+        medico.setPersona(persona);
+
+        LocalDateTime ingreso = LocalDateTime.of(2026, 10, 20, 8, 0);
+        LocalDateTime egreso = LocalDateTime.of(2026, 10, 22, 9, 0);
+
+        PersonaEntity personaResponsable = new PersonaEntity();
+        personaResponsable.setPrimerNombre("Rosa");
+        personaResponsable.setPrimerApellido("López");
+        personaResponsable.setTelefono("5555-0101");
+
+        EpisodioEntity episodio = EpisodioEntity.builder()
+                .id(7L)
+                .tipoAtencion(TipoAtencion.HOSPITALIZACION)
+                .descripcion("Ingreso por observación")
+                .fechaHoraIngreso(ingreso)
+                .medico(medico)
+                .cama(camasEntity.builder().id(11L).codigo("A-106").build())
+                .personaResponsable(PersonaResponsableEntity.builder()
+                        .persona(personaResponsable)
+                        .build())
+                .estado(false)
+                .build();
+
+        when(pacienteRepository.existsById(3L)).thenReturn(true);
+        when(episodioRepository.findByPaciente_IdOrderByIdDesc(3L))
+                .thenReturn(List.of(episodio));
+        when(altaRepository.findFirstByEpisodio_IdAndEstadoOrderByFechaHoraEgresoDesc(
+                7L, EstadoAlta.VIGENTE))
+                .thenReturn(Optional.of(altaEntity.builder().fechaHoraEgreso(egreso).build()));
+
+        List<ExpedienteDTOs.EpisodioResumenResponse> respuesta = service.listarEpisodios(3L);
+
+        assertEquals(1, respuesta.size());
+        ExpedienteDTOs.EpisodioResumenResponse item = respuesta.get(0);
+        assertEquals(7L, item.episodioId());
+        assertEquals(TipoAtencion.HOSPITALIZACION, item.tipoAtencion());
+        assertEquals(ingreso, item.fechaHoraIngreso());
+        assertEquals(egreso, item.fechaHoraEgreso());
+        assertEquals("Ana Pérez", item.medicoNombre());
+        assertEquals("Ingreso por observación", item.descripcion());
+        assertEquals("A-106", item.camaCodigo());
+        assertEquals("Rosa López", item.responsableNombre());
+        assertEquals("5555-0101", item.responsableTelefono());
+        assertFalse(item.activo());
+    }
+
+    @Test
+    void listarEpisodios_rechazaPacienteInexistente() {
+        when(pacienteRepository.existsById(99L)).thenReturn(false);
+
+        assertThrows(IllegalArgumentException.class, () -> service.listarEpisodios(99L));
+    }
+
+    @Test
+    void listarEpisodios_conMedicoNoAsignado_lanzaAccessDenied() {
+        when(pacienteRepository.existsById(3L)).thenReturn(true);
+        when(usuarioActualService.medicoRestringidoId()).thenReturn(Optional.of(5L));
+        when(pacienteRepository.existsByIdAndMedicos_Id(3L, 5L)).thenReturn(false);
+
+        assertThrows(AccessDeniedException.class, () -> service.listarEpisodios(3L));
+    }
+
+    @Test
+    void listarEpisodios_conMedicoAsignado_devuelveSusEpisodios() {
+        when(pacienteRepository.existsById(3L)).thenReturn(true);
+        when(usuarioActualService.medicoRestringidoId()).thenReturn(Optional.of(5L));
+        when(pacienteRepository.existsByIdAndMedicos_Id(3L, 5L)).thenReturn(true);
+        when(episodioRepository.findByPaciente_IdOrderByIdDesc(3L)).thenReturn(List.of());
+
+        assertTrue(service.listarEpisodios(3L).isEmpty());
+    }
+}

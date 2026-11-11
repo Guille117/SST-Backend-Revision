@@ -1,0 +1,180 @@
+package com.example.demo.modules.enfermeria.monitoreo.signosVitales;
+
+import com.example.demo.modules.enfermeria.tratamientos.ejecucionesCuidado.EstadoEjecucionCuidado;
+import com.example.demo.modules.enfermeria.tratamientos.ejecucionesCuidado.ejecucionCuidadoDTOs;
+import com.example.demo.modules.enfermeria.tratamientos.ejecucionesCuidado.ejecucionCuidadoService;
+import com.example.demo.modules.pacientes.paciente.EpisodioEntity;
+import com.example.demo.modules.pacientes.paciente.EpisodioRepository;
+import com.example.demo.modules.usuarios.usuarios.UsuarioEntity;
+import com.example.demo.modules.usuarios.usuarios.UsuarioNombreCorto;
+import com.example.demo.modules.usuarios.usuarios.UsuarioRepository;
+import com.example.demo.security.RegistroAccesoService;
+import com.example.demo.utils.StringNormalizer;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Service
+@RequiredArgsConstructor
+public class signosVitalesService {
+
+    private final signosVitalesRepository repository;
+    private final EpisodioRepository episodioRepository;
+    private final UsuarioRepository usuarioRepository;
+    private final ejecucionCuidadoService ejecucionCuidadoService;
+    private final RegistroAccesoService registroAcceso;
+
+    @Transactional
+    public signosVitalesDTOs.Response crear(signosVitalesDTOs.Request request) {
+        if (request == null) {
+            throw new IllegalArgumentException("La solicitud es obligatoria");
+        }
+
+        signosVitalesEntity entity = signosVitalesEntity.builder()
+                .sistolica(request.sistolica())
+                .diastolica(request.diastolica())
+                .frecuenciaCardiaca(request.frecuenciaCardiaca())
+                .frecuenciaRespiratoria(request.frecuenciaRespiratoria())
+                .temperatura(request.temperatura())
+                .saturacion(request.saturacion())
+                .observacion(StringNormalizer.normalizarNullable(request.observacion()))
+                .episodio(buscarEpisodio(request.episodioId()))
+                .usuario(autor(request.usuarioId()))
+                .fecha(LocalDateTime.now())
+                .build();
+
+        signosVitalesEntity guardado = repository.save(entity);
+        registrarEjecucionControl(request, guardado);
+        return toResponse(guardado);
+    }
+
+    /** Vincula la toma con la atención indicada y marca la ejecución como realizada. */
+    private void registrarEjecucionControl(signosVitalesDTOs.Request request, signosVitalesEntity entity) {
+        if (request.cuidadoId() == null) return;
+
+        LocalDateTime programada = request.fechaHoraProgramada() != null
+                ? request.fechaHoraProgramada()
+                : LocalDateTime.now();
+
+        ejecucionCuidadoService.crear(new ejecucionCuidadoDTOs.Request(
+                request.cuidadoId(),
+                programada,
+                EstadoEjecucionCuidado.REALIZADO,
+                entity.getObservacion(),
+                request.usuarioId(),
+                entity.getId(),
+                null,
+                null));
+    }
+
+    @Transactional
+    public signosVitalesDTOs.Response actualizar(Long id, signosVitalesDTOs.Request request) {
+        if (request == null) {
+            throw new IllegalArgumentException("Sin datos para actualizar");
+        }
+
+        signosVitalesEntity entity = buscar(id);
+        registroAcceso.validarEdicion(entity.getUsuario());
+
+        UsuarioEntity autorActualizado = registroAcceso.autorParaEdicion(entity.getUsuario(), request.usuarioId());
+        entity.setUsuario(autorActualizado != null ? autorActualizado : buscarUsuario(request.usuarioId()));
+
+        entity.setSistolica(request.sistolica());
+        entity.setDiastolica(request.diastolica());
+        entity.setFrecuenciaCardiaca(request.frecuenciaCardiaca());
+        entity.setFrecuenciaRespiratoria(request.frecuenciaRespiratoria());
+        entity.setTemperatura(request.temperatura());
+        entity.setSaturacion(request.saturacion());
+        entity.setObservacion(StringNormalizer.normalizarNullable(request.observacion()));
+        entity.setEpisodio(buscarEpisodio(request.episodioId()));
+
+        return toResponse(repository.save(entity));
+    }
+
+    @Transactional(readOnly = true)
+    public signosVitalesDTOs.Response obtenerPorId(Long id) {
+        return toResponse(buscar(id));
+    }
+
+    @Transactional(readOnly = true)
+    public List<signosVitalesDTOs.Response> buscarPorEpisodio(Long episodioId) {
+        if (episodioId == null) {
+            throw new IllegalArgumentException("El episodio es obligatorio para la búsqueda");
+        }
+        registroAcceso.validarAccesoEpisodio(episodioId);
+
+        return repository.findByEpisodio_IdAndEliminadoFalseOrderByFechaDesc(episodioId).stream()
+                .map(this::toResponse)
+                .toList();
+    }
+
+    @Transactional
+    public void eliminar(Long id) {
+        signosVitalesEntity entity = buscar(id);
+        registroAcceso.validarEdicion(entity.getUsuario());
+        entity.setEliminado(true);
+        repository.save(entity);
+    }
+
+    private signosVitalesEntity buscar(Long id) {
+        signosVitalesEntity entity = repository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Registro de signos vitales no encontrado con el ID: " + id));
+        registroAcceso.validarAccesoEpisodio(entity.getEpisodio());
+        return entity;
+    }
+
+    private EpisodioEntity buscarEpisodio(Long episodioId) {
+        if (episodioId == null) {
+            throw new IllegalArgumentException("El episodio es obligatorio");
+        }
+
+        EpisodioEntity episodio = episodioRepository.findById(episodioId)
+                .orElseThrow(() -> new IllegalArgumentException("Episodio no encontrado con el ID: " + episodioId));
+        registroAcceso.validarAccesoEpisodio(episodio);
+        return episodio;
+    }
+
+    private UsuarioEntity autor(Long usuarioId) {
+        UsuarioEntity autenticado = registroAcceso.autorActual(usuarioId);
+        return autenticado != null ? autenticado : buscarUsuario(usuarioId);
+    }
+
+    private UsuarioEntity buscarUsuario(Long usuarioId) {
+        if (usuarioId == null) {
+            throw new IllegalArgumentException("El usuario es obligatorio");
+        }
+
+        return usuarioRepository.findById(usuarioId)
+                .orElseThrow(() -> new IllegalArgumentException("Usuario no encontrado con el ID: " + usuarioId));
+    }
+
+    private String nombreUsuario(UsuarioEntity usuario) {
+        if (usuario == null) {
+            return null;
+        }
+
+        String nombreCompleto = usuario.getPersona() != null ? usuario.getPersona().getNombreCompleto() : "";
+        return nombreCompleto.isBlank() ? usuario.getUsername() : nombreCompleto;
+    }
+
+    private signosVitalesDTOs.Response toResponse(signosVitalesEntity entity) {
+        return new signosVitalesDTOs.Response(
+                entity.getId(),
+                entity.getSistolica(),
+                entity.getDiastolica(),
+                entity.getFrecuenciaCardiaca(),
+                entity.getFrecuenciaRespiratoria(),
+                entity.getTemperatura(),
+                entity.getSaturacion(),
+                entity.getObservacion(),
+                entity.getEpisodio().getId(),
+                entity.getUsuario().getId(),
+                nombreUsuario(entity.getUsuario()),
+                UsuarioNombreCorto.formatear(entity.getUsuario()),
+                entity.getFecha(),
+                entity.isEliminado());
+    }
+}
